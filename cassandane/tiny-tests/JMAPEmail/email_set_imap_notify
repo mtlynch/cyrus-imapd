@@ -3,9 +3,11 @@ use Cassandane::Tiny;
 
 sub assert_email_set_imap_notify ($self, $change, $selected)
 {
+    # Run idled to relay JMAP mailbox events to IMAP clients.
     $self->{instance}->add_start(name => 'idled', argv => [ 'idled' ]);
     $self->_start_instances();
 
+    xlog $self, "Create mailboxes and an unread email in INBOX";
     my $user = $self->default_user;
     my $jmap = $user->jmap;
     my $inbox = $user->mailboxes->inbox;
@@ -24,6 +26,8 @@ sub assert_email_set_imap_notify ($self, $change, $selected)
     $self->assert_num_equals(1, $before->{messages});
     $self->assert_num_equals(1, $before->{unseen});
 
+    # Select Other to exercise notifications for an unselected INBOX.
+    xlog $self, "Subscribe to IMAP updates and enter IDLE (selected=$selected)";
     $talk->examine($selected ? 'INBOX' : 'INBOX.Other')
         or die "EXAMINE failed: $@";
     $talk->_imap_cmd('NOTIFY', 0, '', 'SET',
@@ -44,7 +48,9 @@ sub assert_email_set_imap_notify ($self, $change, $selected)
     $set->as_set->assert_no_errors;
     $self->assert(exists $set->arguments->{updated}{$emailid});
 
-    # Do not send NOOP, STATUS, or DONE until unsolicited updates are checked.
+    xlog $self, "Check unsolicited IMAP updates before sending DONE";
+    # Keep the client idle until we check the updates; NOOP, STATUS, or DONE
+    # could trigger a refresh and hide the missing notifications.
     # Each read replaces the cached STATUS entry. Merge mailboxes and items
     # across reads, since different event types report different STATUS items.
     my %status;
@@ -73,6 +79,8 @@ sub assert_email_set_imap_notify ($self, $change, $selected)
         }
     }
 
+    # IMAP reports selected-mailbox changes through EXPUNGE or FETCH,
+    # and reports changes in other mailboxes through STATUS.
     if ($change eq 'move') {
         $self->assert_cmp_deeply(
             superhashof({
