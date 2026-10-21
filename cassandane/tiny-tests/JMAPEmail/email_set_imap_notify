@@ -1,0 +1,136 @@
+#!perl
+use Cassandane::Tiny;
+
+sub assert_email_set_imap_notify ($self, $change, $selected)
+{
+    $self->{instance}->add_start(name => 'idled', argv => [ 'idled' ]);
+    $self->_start_instances();
+
+    my $user = $self->default_user;
+    my $jmap = $user->jmap;
+    my $inbox = $user->mailboxes->inbox;
+    my $trash = $user->mailboxes->create({ name => 'Trash', role => 'trash' });
+    $user->mailboxes->create({ name => 'Other' });
+    my $email = $inbox->new_email({ subject => 'IMAP notification test' });
+    my $emailid = $email->id;
+
+    my $store = $self->{store};
+    my $talk = $store->get_client();
+    $self->assert($talk->capability()->{notify});
+    $talk->_imap_cmd('ENABLE', 0, 'enabled', 'CONDSTORE');
+    $self->assert_str_equals('ok', $talk->get_last_completion_response());
+
+    my $before = $talk->status('INBOX', '(MESSAGES UNSEEN HIGHESTMODSEQ)');
+    $self->assert_num_equals(1, $before->{messages});
+    $self->assert_num_equals(1, $before->{unseen});
+
+    $talk->examine($selected ? 'INBOX' : 'INBOX.Other')
+        or die "EXAMINE failed: $@";
+    $talk->_imap_cmd('NOTIFY', 0, '', 'SET',
+                    '(SELECTED (MessageNew MessageExpunge FlagChange))',
+                    '(PERSONAL (MessageNew MessageExpunge FlagChange))');
+    $self->assert_str_equals('ok', $talk->get_last_completion_response());
+    $talk->clear_response_code($_) for qw(status fetch expunge);
+    $store->idle_begin() or die "IDLE failed: $@";
+
+    xlog $self, "Change email via JMAP while IMAP is idle: $change";
+    my $patch = $change eq 'move'
+        ? { mailboxIds => { $trash->id => JSON::true } }
+        : { 'keywords/$seen' => JSON::true };
+    my $res = $jmap->request([
+        ['Email/set', { update => { $emailid => $patch } }],
+    ]);
+    my $set = $res->single_sentence('Email/set');
+    $set->as_set->assert_no_errors;
+    $self->assert(exists $set->arguments->{updated}{$emailid});
+
+    # Do not send NOOP, STATUS, or DONE until unsolicited updates are checked.
+    # Each read replaces the cached STATUS entry. Merge mailboxes and items
+    # across reads, since different event types report different STATUS items.
+    my %status;
+    for (1..10) {
+        last unless $store->idle_response({}, 5);
+        my $updates = $talk->get_response_code('status') || {};
+        foreach my $mailbox (keys %$updates) {
+            $status{$mailbox} = {
+                %{ $status{$mailbox} || {} }, %{ $updates->{$mailbox} },
+            };
+        }
+
+        my $inbox_status = $status{INBOX} || {};
+        my $trash_status = $status{'INBOX.Trash'} || {};
+        if ($change eq 'move') {
+            last if exists $trash_status->{messages}
+                && ($selected ? defined $talk->get_response_code('expunge')
+                              : exists $inbox_status->{messages});
+        }
+        elsif ($selected) {
+            my $fetch = $talk->get_response_code('fetch') || {};
+            last if exists $fetch->{1};
+        }
+        else {
+            last if exists $inbox_status->{unseen};
+        }
+    }
+
+    if ($change eq 'move') {
+        $self->assert_cmp_deeply(
+            superhashof({
+                'INBOX.Trash' => superhashof({ messages => 1, uidnext => 2 }),
+                ($selected ? () : (
+                    INBOX => superhashof({ messages => 0 }),
+                )),
+            }),
+            \%status,
+        );
+        if ($selected) {
+            $self->assert_num_equals(1, $talk->get_response_code('expunge'));
+        }
+    }
+    elsif ($selected) {
+        $self->assert_cmp_deeply(
+            superhashof({
+                1 => superhashof({ uid => 1, flags => superbagof('\\Seen') }),
+            }),
+            $talk->get_response_code('fetch'),
+        );
+    }
+    else {
+        $self->assert_cmp_deeply(
+            superhashof({ INBOX => superhashof({ unseen => 0 }) }),
+            \%status,
+        );
+        $self->assert_num_gt($before->{highestmodseq}, $status{INBOX}{highestmodseq});
+    }
+
+    $store->idle_end({});
+    $self->assert_str_equals('ok', $talk->get_last_completion_response());
+}
+
+sub test_email_set_imap_notify__move_selected
+    :needs_component_idled :NoStartInstances :NoAltNamespace
+    ($self)
+{
+    $self->assert_email_set_imap_notify('move', 1);
+}
+
+sub test_email_set_imap_notify__move_unselected
+    :needs_component_idled :NoStartInstances :NoAltNamespace
+    ($self)
+{
+    $self->assert_email_set_imap_notify('move', 0);
+}
+
+sub test_email_set_imap_notify__seen_selected
+    :needs_component_idled :NoStartInstances :NoAltNamespace
+    ($self)
+{
+    $self->assert_email_set_imap_notify('seen', 1);
+}
+
+sub test_email_set_imap_notify__seen_unselected
+    :needs_component_idled :NoStartInstances :NoAltNamespace
+    ($self)
+{
+    $self->assert_email_set_imap_notify('seen', 0);
+}

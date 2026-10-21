@@ -773,7 +773,7 @@ int service_init(int argc __attribute__((unused)),
     global_sasl_init(1, 1, mysasl_cb);
 
     /* setup for sending IMAP IDLE notifications */
-    idle_enabled();
+    idle_init();
 
     /* Set namespace */
     if ((r = mboxname_init_namespace(&httpd_namespace, NAMESPACE_OPTION_ADMIN))) {
@@ -1167,6 +1167,8 @@ void shut_down(int code)
     auditlog_traffic(bytes_in, bytes_out);
 
     saslprops_free(&saslprops);
+
+    idle_done();
 
     cyrus_done();
 

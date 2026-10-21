@@ -1,0 +1,24 @@
+Description:
+
+Send IMAP IDLE/NOTIFY updates for message moves and flag changes made via JMAP.
+httpd forwards these changes through idled, matching the IMAP and LMTP services.
+
+
+Documentation:
+
+None.
+
+
+Config changes:
+
+None.
+
+
+Upgrade instructions:
+
+None.
+
+
+GitHub issue:
+
+None. Reported at https://todo.sr.ht/~whynothugo/ImapGoose/28.
